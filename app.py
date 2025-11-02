@@ -165,6 +165,13 @@ app.layout = html.Div(
             style_card(dcc.Graph(id="g_scatter_ci"), flex=1),
             style_card(dcc.Graph(id="g_box"), flex=1),
         ], style={"maxWidth": "1200px", "margin": "0 auto", "display": "flex", "gap": "14px"}),
+
+        # Fila 3 – Importación mensual y Distribución del consumo
+        html.Div([
+            style_card(dcc.Graph(id="g_import_bar"), flex=1),
+            style_card(dcc.Graph(id="g_pie_consumo"), flex=1),
+        ], style={"maxWidth": "1200px", "margin": "14px auto 0", "display": "flex", "gap": "14px"}),
+
     ]
 )
 
@@ -186,6 +193,8 @@ def filter_df(fuente, combustible, rng_vals):
     Output("g_ma", "figure"),
     Output("g_scatter_ci", "figure"),
     Output("g_box", "figure"),
+    Output("g_import_bar", "figure"),
+    Output("g_pie_consumo", "figure"),
     Input("fnt", "value"),
     Input("cmb", "value"),
     Input("rng", "value"),
@@ -250,7 +259,45 @@ def update_plots(fuente, combustible, rng_vals):
     fig_box.update_traces(marker_color=PALETTE["coral"], line_color=PALETTE["coral"])
     fig_box = apply_pastel_layout(fig_box)
 
-    return fig_ts, fig_ma, fig_scatter, fig_box
+    # === Importación promedio por mes (agrupado por combustible) ===
+    # Se filtra por el mismo rango de fechas del slider
+    i0, i1 = rng_vals
+    i_min_date = idx_to_date.get(i0, d["Fecha"].min())
+    i_max_date = idx_to_date.get(i1, d["Fecha"].max())
+
+    imp = importacion_long[(importacion_long["Fecha"] >= i_min_date) &
+                           (importacion_long["Fecha"] <= i_max_date)].copy()
+
+    # promedio por mes y combustible
+    imp_grp = (imp.groupby(["Mes", "Combustible"], as_index=False)["Barriles"]
+                  .mean()
+                  .sort_values("Mes"))
+
+    # etiquetas de meses (ene–dic)
+    meses_lbl = ["Ene","Feb","Mar","Abr","May","Jun","Jul","Ago","Sep","Oct","Nov","Dic"]
+    fig_import = px.bar(
+        imp_grp, x="Mes", y="Barriles", color="Combustible", barmode="group",
+        title="Importación promedio por mes (periodo seleccionado)"
+    )
+    fig_import.update_xaxes(tickmode="array", tickvals=list(range(1,13)), ticktext=meses_lbl)
+    fig_import = apply_pastel_layout(fig_import)
+
+    # === Distribución del consumo por combustible (pastel) ===
+    cons = consumo_long[(consumo_long["Fecha"] >= i_min_date) &
+                        (consumo_long["Fecha"] <= i_max_date)].copy()
+    cons_grp = cons.groupby("Combustible", as_index=False)["Barriles"].sum()
+
+    fig_pie = px.pie(
+        cons_grp, names="Combustible", values="Barriles",
+        title="Distribución del consumo por combustible", hole=0.35
+    )
+    # etiquetas afuera para lectura clara
+    fig_pie.update_traces(textposition="outside")
+    fig_pie = apply_pastel_layout(fig_pie)
+
+
+    return fig_ts, fig_ma, fig_scatter, fig_box, fig_import, fig_pie
+
 
 
 if __name__ == "__main__":
