@@ -1,12 +1,13 @@
 # app.py
 # Dashboard interactivo con Plotly Dash para explorar Consumo e Importación de combustibles
-# Requisitos: pip install dash plotly pandas scikit-learn
+# Requisitos: pip install dash plotly pandas scikit-learn dash-bootstrap-components
 
 import pandas as pd
 import numpy as np
 from pathlib import Path
 
 from dash import Dash, html, dcc, Input, Output
+import dash_bootstrap_components as dbc
 import plotly.express as px
 import plotly.graph_objects as go
 from sklearn.linear_model import LinearRegression
@@ -25,6 +26,8 @@ PALETTE = {
     "grid": "rgba(31,41,55,0.08)"
 }
 
+GRAPH_H = "420px"  # altura estable para todos los gráficos
+
 def style_card(children, flex=1):
     return html.Div(
         children,
@@ -33,7 +36,10 @@ def style_card(children, flex=1):
             "background": "#FFFFFF",
             "borderRadius": "16px",
             "boxShadow": "0 8px 20px rgba(0,0,0,0.06)",
-            "padding": "14px"
+            "padding": "14px",
+            "display": "flex",          # evita crecimiento infinito
+            "flexDirection": "column",  # header arriba, graph abajo
+            "overflow": "hidden"        # oculta cualquier desborde
         }
     )
 
@@ -52,6 +58,29 @@ def apply_pastel_layout(fig, title=None):
     fig.update_yaxes(showline=True, linewidth=1, linecolor=PALETTE["grid"],
                      gridcolor=PALETTE["grid"], zeroline=False, ticks="outside")
     return fig
+
+# Encabezado con ícono ℹ y tooltip
+def card_header(title: str, tip_id: str, tip_text: str):
+    return html.Div(
+        [
+            html.Span(title, style={"fontWeight": 600, "color": PALETTE["ink"]}),
+            html.Span(
+                "ℹ",
+                id=tip_id,
+                style={
+                    "cursor": "help",
+                    "fontWeight": 700,
+                    "padding": "0 6px",
+                    "borderRadius": "999px",
+                    "background": PALETTE["mint"],
+                    "color": PALETTE["ink"],
+                    "marginLeft": "8px",
+                },
+            ),
+            dbc.Tooltip(tip_text, target=tip_id, placement="bottom", style={"fontSize": "12px"}),
+        ],
+        style={"display": "flex", "alignItems": "center", "gap": "4px", "marginBottom": "6px"},
+    )
 
 # ----------------------------
 # Carga de datos
@@ -100,10 +129,12 @@ COMBUSTIBLES = value_vars
 app = Dash(
     __name__,
     title="Combustibles – Consumo e Importación",
-    external_stylesheets=["https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap"]
+    external_stylesheets=[
+        dbc.themes.FLATLY,
+        "https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap",
+    ],
 )
 server = app.server
-
 
 app.layout = html.Div(
     style={"background": PALETTE["cream"], "minHeight": "100vh", "padding": "24px", "fontFamily": "Inter, system-ui, -apple-system, Segoe UI, Arial"},
@@ -155,23 +186,49 @@ app.layout = html.Div(
             "gap": "14px", "alignItems": "flex-end"
         }),
 
-        # Contenido 2x2
+        # Contenido 2x2 con encabezados + tooltip
         html.Div([
-            style_card(dcc.Graph(id="g_ts"), flex=1),
-            style_card(dcc.Graph(id="g_ma"), flex=1),
+            style_card([
+                card_header("Serie temporal", "tip-ts",
+                            "Evolución de barriles en el tiempo. Usa zoom/arrastre para actualizar las demás vistas."),
+                dcc.Graph(id="g_ts", style={"height": GRAPH_H}),
+            ], flex=1),
+
+            style_card([
+                card_header("Tendencia (media móvil 12m)", "tip-ma",
+                            "Suaviza fluctuaciones con una ventana de 12 meses."),
+                dcc.Graph(id="g_ma", style={"height": GRAPH_H}),
+            ], flex=1),
         ], style={"maxWidth": "1200px", "margin": "0 auto 14px", "display": "flex", "gap": "14px"}),
 
         html.Div([
-            style_card(dcc.Graph(id="g_scatter_ci"), flex=1),
-            style_card(dcc.Graph(id="g_box"), flex=1),
+            style_card([
+                card_header("Relación Consumo vs Importación", "tip-sc",
+                            "Dispersión con línea de correlación. Selecciona con lazo/rectángulo para resaltar en la serie."),
+                dcc.Graph(id="g_scatter_ci", style={"height": GRAPH_H}),
+            ], flex=1),
+
+            style_card([
+                card_header("Distribución por mes (boxplot)", "tip-box",
+                            "Haz clic en un mes para explorar su comportamiento en el periodo seleccionado."),
+                dcc.Graph(id="g_box", style={"height": GRAPH_H}),
+            ], flex=1),
         ], style={"maxWidth": "1200px", "margin": "0 auto", "display": "flex", "gap": "14px"}),
 
-        # Fila 3 – Importación mensual y Distribución del consumo
+        # Fila 3 – Importación mensual y Distribución del consumo (con tooltips)
         html.Div([
-            style_card(dcc.Graph(id="g_import_bar"), flex=1),
-            style_card(dcc.Graph(id="g_pie_consumo"), flex=1),
-        ], style={"maxWidth": "1200px", "margin": "14px auto 0", "display": "flex", "gap": "14px"}),
+            style_card([
+                card_header("Importación promedio por mes", "tip-imp",
+                            "Promedio mensual dentro del rango; compara combustibles por mes."),
+                dcc.Graph(id="g_import_bar", style={"height": GRAPH_H}),
+            ], flex=1),
 
+            style_card([
+                card_header("Distribución del consumo por combustible", "tip-pie",
+                            "Participación relativa de cada combustible en el periodo seleccionado."),
+                dcc.Graph(id="g_pie_consumo", style={"height": GRAPH_H}),
+            ], flex=1),
+        ], style={"maxWidth": "1200px", "margin": "14px auto 0", "display": "flex", "gap": "14px"}),
     ]
 )
 
@@ -186,7 +243,7 @@ def filter_df(fuente, combustible, rng_vals):
     return d
 
 # ----------------------------
-# Callback principal (2x2)
+# Callback principal
 # ----------------------------
 @app.callback(
     Output("g_ts", "figure"),
@@ -227,7 +284,7 @@ def update_plots(fuente, combustible, rng_vals):
     i_max_date = idx_to_date.get(i1, d["Fecha"].max())
     m = m[(m["Fecha"] >= i_min_date) & (m["Fecha"] <= i_max_date)]
 
-    # Línea de correlación con LinearRegression (evita dependencia de statsmodels)
+    # Línea de correlación
     X = m[[col_i]].values
     y = m[col_c].values
     if len(m) >= 2:
@@ -260,20 +317,11 @@ def update_plots(fuente, combustible, rng_vals):
     fig_box = apply_pastel_layout(fig_box)
 
     # === Importación promedio por mes (agrupado por combustible) ===
-    # Se filtra por el mismo rango de fechas del slider
-    i0, i1 = rng_vals
-    i_min_date = idx_to_date.get(i0, d["Fecha"].min())
-    i_max_date = idx_to_date.get(i1, d["Fecha"].max())
-
     imp = importacion_long[(importacion_long["Fecha"] >= i_min_date) &
                            (importacion_long["Fecha"] <= i_max_date)].copy()
-
-    # promedio por mes y combustible
     imp_grp = (imp.groupby(["Mes", "Combustible"], as_index=False)["Barriles"]
                   .mean()
                   .sort_values("Mes"))
-
-    # etiquetas de meses (ene–dic)
     meses_lbl = ["Ene","Feb","Mar","Abr","May","Jun","Jul","Ago","Sep","Oct","Nov","Dic"]
     fig_import = px.bar(
         imp_grp, x="Mes", y="Barriles", color="Combustible", barmode="group",
@@ -286,19 +334,14 @@ def update_plots(fuente, combustible, rng_vals):
     cons = consumo_long[(consumo_long["Fecha"] >= i_min_date) &
                         (consumo_long["Fecha"] <= i_max_date)].copy()
     cons_grp = cons.groupby("Combustible", as_index=False)["Barriles"].sum()
-
     fig_pie = px.pie(
         cons_grp, names="Combustible", values="Barriles",
         title="Distribución del consumo por combustible", hole=0.35
     )
-    # etiquetas afuera para lectura clara
     fig_pie.update_traces(textposition="outside")
     fig_pie = apply_pastel_layout(fig_pie)
 
-
     return fig_ts, fig_ma, fig_scatter, fig_box, fig_import, fig_pie
-
-
 
 if __name__ == "__main__":
     app.run(debug=True)
