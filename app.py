@@ -1,15 +1,57 @@
 # app.py
 # Dashboard interactivo con Plotly Dash para explorar Consumo e Importación de combustibles
-# Requisitos: pip install dash plotly pandas
-# (Opcional para estilos): pip install dash-bootstrap-components
+# Requisitos: pip install dash plotly pandas scikit-learn
 
 import pandas as pd
+import numpy as np
 from pathlib import Path
-from datetime import datetime
 
-from dash import Dash, html, dcc, Input, Output, State, dash_table
+from dash import Dash, html, dcc, Input, Output
 import plotly.express as px
 import plotly.graph_objects as go
+from sklearn.linear_model import LinearRegression
+
+# ----------------------------
+# Paleta y helpers de estilo
+# ----------------------------
+PALETTE = {
+    "cream": "#F7F3DF",   # fondo
+    "coral": "#ECA07D",   # acentos cálidos
+    "yellow": "#F6F07A",
+    "mint": "#B9EE93",
+    "sky": "#9EC1E6",     # series principales
+    "ink": "#1F2937",     # texto
+    "muted": "#6B7280",   # texto secundario
+    "grid": "rgba(31,41,55,0.08)"
+}
+
+def style_card(children, flex=1):
+    return html.Div(
+        children,
+        style={
+            "flex": flex,
+            "background": "#FFFFFF",
+            "borderRadius": "16px",
+            "boxShadow": "0 8px 20px rgba(0,0,0,0.06)",
+            "padding": "14px"
+        }
+    )
+
+def apply_pastel_layout(fig, title=None):
+    fig.update_layout(
+        title=title or fig.layout.title.text,
+        paper_bgcolor="#FFFFFF",
+        plot_bgcolor="#FFFFFF",
+        margin=dict(l=24, r=16, t=48, b=24),
+        font=dict(family="Inter, Segoe UI, system-ui, -apple-system, Arial",
+                  size=13, color=PALETTE["ink"]),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0),
+    )
+    fig.update_xaxes(showline=True, linewidth=1, linecolor=PALETTE["grid"],
+                     gridcolor=PALETTE["grid"], zeroline=False, ticks="outside")
+    fig.update_yaxes(showline=True, linewidth=1, linecolor=PALETTE["grid"],
+                     gridcolor=PALETTE["grid"], zeroline=False, ticks="outside")
+    return fig
 
 # ----------------------------
 # Carga de datos
@@ -21,292 +63,195 @@ importacion_path = BASE_DIR / "Importacion.xlsx"
 consumo = pd.read_excel(consumo_path, parse_dates=["Fecha"]).assign(Fuente="Consumo")
 importacion = pd.read_excel(importacion_path, parse_dates=["Fecha"]).assign(Fuente="Importación")
 
-# Unificamos el esquema a formato largo para facilitar filtros y gráficas
-id_vars = ["Fecha", "Fuente"]
 value_vars = ["Gasolina regular", "Gasolina superior", "Diesel alto azufre"]
+id_vars = ["Fecha", "Fuente"]
 
 def to_long(df):
     long = df.melt(id_vars=id_vars, value_vars=value_vars, var_name="Combustible", value_name="Barriles")
     long["Año"] = long["Fecha"].dt.year
     long["Mes"] = long["Fecha"].dt.month
     long["MesNombre"] = long["Fecha"].dt.strftime("%b")
-    long["YYYYMM"] = long["Fecha"].dt.strftime("%Y-%m")
     return long
 
 consumo_long = to_long(consumo)
 importacion_long = to_long(importacion)
+full = pd.concat([consumo_long, importacion_long], ignore_index=True).sort_values("Fecha")
 
-full = pd.concat([consumo_long, importacion_long], ignore_index=True)
-full.sort_values("Fecha", inplace=True)
-
-# Para enlaces entre fuentes, construimos un merge en fechas (para scatter Importación vs Consumo)
+# para scatter: unir por fecha
 consumo_wide = consumo.set_index("Fecha")[value_vars]
-import_wide = importacion.set_index("Fecha")[value_vars]
-merged_wide = consumo_wide.join(import_wide, how="inner", lsuffix="_Consumo", rsuffix="_Importación").reset_index()
+import_wide  = importacion.set_index("Fecha")[value_vars]
+merged_wide  = consumo_wide.join(import_wide, how="inner",
+                                 lsuffix="_Consumo", rsuffix="_Importación").reset_index()
 
-# ----------------------------
-# Utilidades de UI
-# ----------------------------
-FUENTES = ["Consumo", "Importación"]
-COMBUSTIBLES = value_vars
-
-min_date = full["Fecha"].min()
-max_date = full["Fecha"].max()
-
-# Para RangeSlider usamos índice entero de meses
-full["idx"] = (full["Año"] - full["Año"].min()) * 12 + (full["Mes"] - 1)
+# slider por mes
+full["idx"] = (full["Fecha"].dt.year - full["Fecha"].dt.year.min()) * 12 + (full["Fecha"].dt.month - 1)
 idx_min, idx_max = int(full["idx"].min()), int(full["idx"].max())
 idx_to_date = full.drop_duplicates("idx")[["idx", "Fecha"]].set_index("idx")["Fecha"].to_dict()
-
 def idx_to_label(i):
     dt = idx_to_date.get(i)
     return dt.strftime("%Y-%m") if dt is not None else str(i)
 
+FUENTES = ["Consumo", "Importación"]
+COMBUSTIBLES = value_vars
+
 # ----------------------------
 # App
 # ----------------------------
-app = Dash(__name__, title="Combustibles – Consumo e Importación")
+app = Dash(
+    __name__,
+    title="Combustibles – Consumo e Importación",
+    external_stylesheets=["https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap"]
+)
 server = app.server
 
-app.layout = html.Div([
-    html.H3("Dashboard Interactivo – Combustibles (Consumo & Importación)"),
-    html.P("Explora patrones temporales y compara Consumo e Importación por tipo de combustible."),
 
-    # Controles
-    html.Div([
+app.layout = html.Div(
+    style={"background": PALETTE["cream"], "minHeight": "100vh", "padding": "24px", "fontFamily": "Inter, system-ui, -apple-system, Segoe UI, Arial"},
+    children=[
+        # Encabezado
         html.Div([
-            html.Label("Fuente"),
-            dcc.RadioItems(options=[{"label": f, "value": f} for f in FUENTES], value="Consumo", id="fnt"),
-        ], style={"flex":1}),
+            html.H2("Dashboard de consumo de combustibles",
+                    style={"margin": "0 0 4px 0", "color": PALETTE["ink"]}),
+            html.P("Elaborado por Emilio Reyes, Michelle Mejia y Silvia Illescas.",
+                   style={"margin": 0, "color": PALETTE["muted"]}),
+        ], style={"maxWidth": "1200px", "margin": "0 auto 16px"}),
+
+        # Barra de filtros
         html.Div([
-            html.Label("Combustible"),
-            dcc.Dropdown(options=[{"label": c, "value": c} for c in COMBUSTIBLES], value="Gasolina regular", id="cmb"),
-        ], style={"flex":2, "marginLeft":"1rem"}),
+            # Fuente
+            html.Div([
+                html.Label("Fuente", style={"fontWeight": 600, "color": PALETTE["ink"]}),
+                dcc.RadioItems(
+                    options=[{"label": f" {f}", "value": f} for f in FUENTES],
+                    value="Consumo", id="fnt", inline=True,
+                    style={
+                        "background": PALETTE["sky"],
+                        "padding": "8px 12px", "borderRadius": "14px"
+                    }
+                ),
+            ], style={"flex": 1}),
+            # Combustible
+            html.Div([
+                html.Label("Combustible", style={"fontWeight": 600, "color": PALETTE["ink"]}),
+                dcc.Dropdown(
+                    options=[{"label": c, "value": c} for c in COMBUSTIBLES],
+                    value="Gasolina regular", id="cmb", clearable=False,
+                    style={"background": PALETTE["yellow"], "borderRadius": "14px"}
+                ),
+            ], style={"flex": 2}),
+            # Rango
+            html.Div([
+                html.Label("Rango de fechas", style={"fontWeight": 600, "color": PALETTE["ink"]}),
+                dcc.RangeSlider(
+                    min=idx_min, max=idx_max, value=[idx_min, idx_max], id="rng",
+                    allowCross=False, tooltip={"placement": "bottom"},
+                    marks={i: idx_to_label(i) for i in range(idx_min, idx_max + 1,
+                          max(1, (idx_max - idx_min)//10))}
+                ),
+            ], style={"flex": 5}),
+        ],
+        style={
+            "maxWidth": "1200px", "margin": "0 auto 20px", "display": "flex",
+            "gap": "14px", "alignItems": "flex-end"
+        }),
+
+        # Contenido 2x2
         html.Div([
-            html.Label("Rango de fechas"),
-            dcc.RangeSlider(min=idx_min, max=idx_max, value=[idx_min, idx_max], id="rng", allowCross=False,
-                            tooltip={"placement":"bottom"},
-                            marks={i: idx_to_label(i) for i in range(idx_min, idx_max+1, max(1, (idx_max-idx_min)//10))}),
-        ], style={"flex":5, "marginLeft":"1rem"}),
-    ], style={"display":"flex", "alignItems":"flex-end", "gap":"1rem", "marginBottom":"1rem"}),
+            style_card(dcc.Graph(id="g_ts"), flex=1),
+            style_card(dcc.Graph(id="g_ma"), flex=1),
+        ], style={"maxWidth": "1200px", "margin": "0 auto 14px", "display": "flex", "gap": "14px"}),
 
-    # Fila 1 – Serie temporal y descomposición ligera (tendencia con media móvil)
-    html.Div([
-        dcc.Graph(id="g_ts", style={"flex": 2}),
-        dcc.Graph(id="g_ma", style={"flex": 1}),
-    ], style={"display":"flex", "gap":"1rem", "marginBottom":"1rem"}),
-
-    # Fila 2 – Estacionalidad mensual (heatmap) y caja por mes
-    html.Div([
-        dcc.Graph(id="g_heat", style={"flex": 1}),
-        dcc.Graph(id="g_box", style={"flex": 1}),
-    ], style={"display":"flex", "gap":"1rem", "marginBottom":"1rem"}),
-
-    # Fila 3 – YoY y comparación Consumo vs Importación (enlazado por combustible)
-    html.Div([
-        dcc.Graph(id="g_yoy", style={"flex": 1}),
-        dcc.Graph(id="g_scatter_ci", style={"flex": 1}),
-    ], style={"display":"flex", "gap":"1rem", "marginBottom":"1rem"}),
-
-    # Fila 4 – Módulo de modelos (placeholder interactividades)
-    html.H4("Modelos simples de predicción"),
-    html.Div([
         html.Div([
-            html.Label("Modelos a comparar"),
-            dcc.Checklist(
-                id="mdl_list",
-                options=[
-                    {"label":"Naive estacional", "value":"naive_seasonal"},
-                    {"label":"Media móvil (12m)", "value":"moving_avg"},
-                    {"label":"Tendencia lineal + mes", "value":"lin_trend"},
-                ],
-                value=["naive_seasonal", "moving_avg", "lin_trend"],
-                inline=True,
-            ),
-            html.Label("Horizonte (meses)"),
-            dcc.Slider(3, 24, 1, value=12, id="h"),
-        ], style={"flex":1}),
-        dcc.Graph(id="g_forecast", style={"flex":2}),
-    ], style={"display":"flex", "gap":"1rem", "marginBottom":"1rem"}),
-
-    dash_table.DataTable(id="tbl_metrics", columns=[
-        {"name":"Modelo", "id":"Modelo"}, {"name":"MAE", "id":"MAE"}, {"name":"RMSE", "id":"RMSE"}, {"name":"MAPE", "id":"MAPE"}
-    ], data=[], style_table={"overflowX":"auto"}),
-
-    html.Hr(),
-    html.Small("Tip: seleccione un rango en la serie temporal para filtrar todas las visualizaciones (enlazado)."),
-])
+            style_card(dcc.Graph(id="g_scatter_ci"), flex=1),
+            style_card(dcc.Graph(id="g_box"), flex=1),
+        ], style={"maxWidth": "1200px", "margin": "0 auto", "display": "flex", "gap": "14px"}),
+    ]
+)
 
 # ----------------------------
-# Callbacks auxiliares
+# Helpers de datos
 # ----------------------------
-
 def filter_df(fuente, combustible, rng_vals):
     i0, i1 = rng_vals
-    d = full[(full["Fuente"]==fuente) & (full["Combustible"]==combustible) & (full["idx"].between(i0, i1))]
-    return d.sort_values("Fecha")
+    d = full[(full["Fuente"] == fuente) &
+             (full["Combustible"] == combustible) &
+             (full["idx"].between(i0, i1))].sort_values("Fecha")
+    return d
 
+# ----------------------------
+# Callback principal (2x2)
+# ----------------------------
 @app.callback(
     Output("g_ts", "figure"),
     Output("g_ma", "figure"),
-    Output("g_heat", "figure"),
-    Output("g_box", "figure"),
-    Output("g_yoy", "figure"),
     Output("g_scatter_ci", "figure"),
+    Output("g_box", "figure"),
     Input("fnt", "value"),
     Input("cmb", "value"),
     Input("rng", "value"),
 )
-def update_core_plots(fuente, combustible, rng_vals):
+def update_plots(fuente, combustible, rng_vals):
     d = filter_df(fuente, combustible, rng_vals)
 
-    # Serie temporal principal
-    fig_ts = px.line(d, x="Fecha", y="Barriles", title=f"{combustible} – {fuente}")
-    fig_ts.update_traces(mode="lines+markers")
+    # --- Serie temporal
+    fig_ts = px.line(d, x="Fecha", y="Barriles", title=f"{combustible} — {fuente}")
+    fig_ts.update_traces(mode="lines+markers", line=dict(color=PALETTE["sky"], width=3),
+                         marker=dict(size=5, opacity=0.85))
+    fig_ts = apply_pastel_layout(fig_ts)
 
-    # Media móvil 12 meses (tendencia suave)
+    # --- Tendencia (MA 12m)
     d2 = d.copy()
     d2["MA12"] = d2["Barriles"].rolling(12, min_periods=1).mean()
     fig_ma = go.Figure()
-    fig_ma.add_trace(go.Scatter(x=d2["Fecha"], y=d2["Barriles"], name="Serie", mode="lines"))
-    fig_ma.add_trace(go.Scatter(x=d2["Fecha"], y=d2["MA12"], name="Media móvil 12m", mode="lines"))
-    fig_ma.update_layout(title="Tendencia (media móvil 12m)")
+    fig_ma.add_trace(go.Scatter(x=d2["Fecha"], y=d2["Barriles"], name="Serie",
+                                mode="lines", line=dict(color=PALETTE["sky"], width=2), opacity=0.6))
+    fig_ma.add_trace(go.Scatter(x=d2["Fecha"], y=d2["MA12"], name="Media móvil 12m",
+                                mode="lines", line=dict(color=PALETTE["coral"], width=4)))
+    fig_ma = apply_pastel_layout(fig_ma, "Tendencia (media móvil 12m)")
 
-    # Heatmap de estacionalidad mensual (promedio por Año x Mes)
-    heat = d.groupby(["Año", "Mes"], as_index=False)["Barriles"].mean()
-    heat_pivot = heat.pivot(index="Año", columns="Mes", values="Barriles").sort_index()
-    fig_heat = px.imshow(heat_pivot, aspect="auto", origin="lower", labels=dict(color="Barriles"),
-                         title="Estacionalidad (promedio Año x Mes)")
-
-    # Caja por mes (variabilidad estacional)
-    fig_box = px.box(d.assign(MesNombre=d["Fecha"].dt.strftime("%b")), x="MesNombre", y="Barriles", points="outliers",
-                     title="Distribución por mes")
-
-    # Crecimiento interanual (YoY) por mes
-    d_yoy = d.set_index("Fecha").sort_index()
-    d_yoy["YoY"] = d_yoy["Barriles"].pct_change(12) * 100
-    d_yoy = d_yoy.reset_index()
-    fig_yoy = px.bar(d_yoy.dropna(subset=["YoY"]), x="Fecha", y="YoY", title="Variación interanual (%)")
-
-    # Scatter Consumo vs Importación (mismo combustible)
+    # --- Dispersión Consumo vs Importación (misma ventana)
     col_c = f"{combustible}_Consumo"
     col_i = f"{combustible}_Importación"
-    m = merged_wide[["Fecha", col_c, col_i]].dropna()
-    # Filtrar por rango seleccionado
+    m = merged_wide[["Fecha", col_c, col_i]].dropna().copy()
     i0, i1 = rng_vals
     i_min_date = idx_to_date.get(i0, d["Fecha"].min())
     i_max_date = idx_to_date.get(i1, d["Fecha"].max())
-    m = m[(m["Fecha"]>=i_min_date) & (m["Fecha"]<=i_max_date)]
-    fig_scatter = px.scatter(m, x=col_i, y=col_c, trendline="ols",
-                             labels={col_i:"Importación (barriles)", col_c:"Consumo (barriles)"},
-                             title="Relación Consumo vs Importación")
+    m = m[(m["Fecha"] >= i_min_date) & (m["Fecha"] <= i_max_date)]
 
-    return fig_ts, fig_ma, fig_heat, fig_box, fig_yoy, fig_scatter
-
-# ----------------------------
-# Modelos simples (baseline):
-#  - naive_seasonal: pronóstico igual al valor de hace 12 meses
-#  - moving_avg: promedio móvil de los últimos 12 meses
-#  - lin_trend: regresión lineal sobre tiempo + dummies de mes (pronóstico por mes futuro)
-# ----------------------------
-from sklearn.linear_model import LinearRegression
-import numpy as np
-
-
-def _make_features(d):
-    d = d.copy().reset_index(drop=True)
-    d["t"] = range(len(d))
-    d["mes"] = d["Fecha"].dt.month
-    X = pd.get_dummies(d[["t", "mes"]].astype(int), columns=["mes"], drop_first=True)
-    y = d["Barriles"].values
-    return X, y, d
-
-
-def forecast_models(d, horizon=12, models=("naive_seasonal", "moving_avg", "lin_trend")):
-    d = d.sort_values("Fecha").copy()
-    out = {}
-
-    # Índices de futuro
-    last_date = d["Fecha"].max()
-    fut_dates = pd.date_range(last_date + pd.offsets.MonthBegin(1), periods=horizon, freq="MS")
-
-    if "naive_seasonal" in models:
-        f_naive = d.set_index("Fecha")["Barriles"].shift(12).dropna()
-        # Para futuro: usamos el último año disponible como plantilla
-        hist = d.set_index("Fecha")["Barriles"]
-        future_vals = []
-        for dt in fut_dates:
-            ref = dt - pd.DateOffset(years=1)
-            future_vals.append(hist.get(ref, np.nan))
-        out["naive_seasonal"] = pd.Series(future_vals, index=fut_dates)
-
-    if "moving_avg" in models:
-        ma = d["Barriles"].rolling(12, min_periods=1).mean().iloc[-1]
-        out["moving_avg"] = pd.Series([ma]*horizon, index=fut_dates)
-
-    if "lin_trend" in models:
-        X, y, d_fe = _make_features(d)
+    # Línea de correlación con LinearRegression (evita dependencia de statsmodels)
+    X = m[[col_i]].values
+    y = m[col_c].values
+    if len(m) >= 2:
         lr = LinearRegression().fit(X, y)
-        # features futuras
-        last_t = d_fe["t"].iloc[-1]
-        fut = pd.DataFrame({
-            "t": range(last_t+1, last_t+1+horizon),
-            "mes": [dt.month for dt in fut_dates]
-        })
-        Xf = pd.get_dummies(fut.astype(int), columns=["mes"], drop_first=True)
-        # Alinear columnas
-        Xf = Xf.reindex(columns=X.columns, fill_value=0)
-        yhat = lr.predict(Xf)
-        out["lin_trend"] = pd.Series(yhat, index=fut_dates)
+        x_line = np.linspace(X.min(), X.max(), 100).reshape(-1, 1)
+        y_line = lr.predict(x_line)
+    else:
+        x_line = np.array([0, 1]).reshape(-1, 1)
+        y_line = np.array([0, 1])
 
-    return out
+    fig_scatter = go.Figure()
+    fig_scatter.add_trace(go.Scatter(
+        x=m[col_i], y=m[col_c], mode="markers", name="Puntos",
+        marker=dict(color=PALETTE["sky"], size=7, line=dict(color="#ffffff", width=0.5), opacity=0.9)
+    ))
+    fig_scatter.add_trace(go.Scatter(
+        x=x_line.flatten(), y=y_line, mode="lines", name="Correlación lineal",
+        line=dict(color=PALETTE["coral"], width=4)
+    ))
+    fig_scatter.update_layout(
+        xaxis_title="Importación (barriles)", yaxis_title="Consumo (barriles)"
+    )
+    fig_scatter = apply_pastel_layout(fig_scatter, "Relación Consumo vs Importación")
 
+    # --- Boxplot por mes
+    d_box = d.assign(MesNombre=d["Fecha"].dt.strftime("%b"))
+    fig_box = px.box(d_box, x="MesNombre", y="Barriles", points="outliers",
+                     title="Distribución por mes")
+    fig_box.update_traces(marker_color=PALETTE["coral"], line_color=PALETTE["coral"])
+    fig_box = apply_pastel_layout(fig_box)
 
-def backtest_mae_rmse_mape(y_true, y_pred):
-    import numpy as np
-    err = y_true - y_pred
-    mae = np.mean(np.abs(err))
-    rmse = np.sqrt(np.mean(err**2))
-    mape = np.mean(np.abs(err / np.where(y_true==0, np.nan, y_true))) * 100
-    return mae, rmse, mape
-
-@app.callback(
-    Output("g_forecast", "figure"),
-    Output("tbl_metrics", "data"),
-    Input("fnt", "value"),
-    Input("cmb", "value"),
-    Input("rng", "value"),
-    Input("mdl_list", "value"),
-    Input("h", "value"),
-)
-def update_models(fuente, combustible, rng_vals, mdl_list, horizon):
-    d = filter_df(fuente, combustible, rng_vals)
-    # Entrenamiento: todo el rango seleccionado menos "horizon" meses para validación simple
-    d = d.sort_values("Fecha").reset_index(drop=True)
-    if len(d) < 24:  # salvaguarda
-        return go.Figure(), []
-
-    train = d.iloc[:-horizon].copy()
-    test = d.iloc[-horizon:].copy()
-
-    fcasts = forecast_models(train, horizon=horizon, models=tuple(mdl_list))
-
-    fig = go.Figure()
-    fig.add_trace(go.Scatter(x=d["Fecha"], y=d["Barriles"], name="Observado", mode="lines"))
-
-    rows = []
-    for name, series in fcasts.items():
-        # Métricas contra test (alinear índices)
-        pred = series.reindex(test["Fecha"]).values
-        mae, rmse, mape = backtest_mae_rmse_mape(test["Barriles"].values, pred)
-        rows.append({"Modelo": name, "MAE": round(float(mae),1), "RMSE": round(float(rmse),1), "MAPE": round(float(mape),2)})
-        fig.add_trace(go.Scatter(x=series.index, y=series.values, name=f"{name}", mode="lines"))
-
-    fig.update_layout(title=f"Pronósticos a {horizon} meses – {combustible} ({fuente})")
-    return fig, rows
+    return fig_ts, fig_ma, fig_scatter, fig_box
 
 
 if __name__ == "__main__":
-    # Ejecutar con: python app.py
     app.run(debug=True)
-
